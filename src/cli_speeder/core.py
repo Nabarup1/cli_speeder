@@ -1,10 +1,10 @@
 import importlib
 import importlib.util
-import importlib.abc  
+import importlib.abc
 import sys
 import os
-from typing import Any, Callable, Optional, TypeVar, Generic, List
-from contextlib import contextmanager
+import threading
+from typing import Any, Callable, Optional, TypeVar, Generic, List, Set
 
 _EAGER_MODE = os.environ.get("CLI_SPEEDER_EAGER", "0") == "1"
 
@@ -88,59 +88,61 @@ def lazy_import(name: str, package: Optional[str] = None) -> Any:
 def lazy_from_import(module_name: str, class_name: str, package: Optional[str] = None) -> Any:
     return LazyObjectProxy(module_name, class_name, package)
 
+
+
 class _LazyFinder(importlib.abc.MetaPathFinder):
     """
     A custom importer that intercepts specific module names and 
-    returns a LazyLoader instead of loading them immediately.
+    returns a LazyLoader.
+    
+    Uses thread-local storage to prevent recursion during delegation.
     """
     def __init__(self, names: List[str]):
         self.names = set(names)
-        self._skip = set() # To prevent recursion
+        self._local = threading.local()
 
     def find_spec(self, fullname, path, target=None):
-        # Check if we should intercept this module
+        # RECURSION CHECK:
+        # If we are already inside a find_spec call on this thread, ignore this call.
+        if getattr(self._local, "in_lookup", False):
+            return None
+
         # We only care if the TOP LEVEL package matches our list
         root_pkg = fullname.split(".")[0]
         if root_pkg not in self.names:
             return None
-            
-        if fullname in self._skip:
-            return None
 
-        # Prevent recursion: Mark this module as "being looked up"
-        self._skip.add(fullname)
-        
+        # DELEGATION (With Guard):
         try:
-            # Find the *real* spec using other finders
-            # IMPORTANT: We iterate sys.meta_path manually to skip ourselves
+            self._local.in_lookup = True  # LOCK
+            
+            # Iterate over other finders manually
             spec = None
             for finder in sys.meta_path:
                 if finder is self: 
                     continue
                 try:
-                    # Check if finder has find_spec (some legacy ones don't)
                     if hasattr(finder, "find_spec"):
                         spec = finder.find_spec(fullname, path, target)
                         if spec:
                             break
-                except ImportError:
+                except (ImportError, AttributeError):
                     continue
 
             if spec is None:
                 return None
 
-            # MAGIC: Wrap the real loader in a LazyLoader
-            # Only wrap if it has a loader 
+            # WRAP IN LAZY LOADER
+            # Only wrap if it has a loader and isn't already lazy
             if spec.loader and not isinstance(spec.loader, importlib.util.LazyLoader):
                 spec.loader = importlib.util.LazyLoader(spec.loader)
             
             return spec
             
         finally:
-            # Always clear the recursion guard
-            self._skip.discard(fullname)
+            self._local.in_lookup = False  # UNLOCK
 
-# Global reference to avoid adding multiple finders
+# Global reference
 _INSTALLED_FINDER = None
 
 def speed_up_modules(modules: List[str]):
@@ -152,20 +154,13 @@ def speed_up_modules(modules: List[str]):
     """
     global _INSTALLED_FINDER
     
-    # Remove numpy/torch from the list if the user accidentally added them
-    # (Safety mechanism for V2)
     unsafe = {"numpy", "torch", "pydantic"}
     safe_modules = [m for m in modules if m not in unsafe]
     
-    if len(safe_modules) != len(modules):
-        # We could warn here, but silent safety is better for CLIs
-        pass
-
     if _INSTALLED_FINDER is None:
         _INSTALLED_FINDER = _LazyFinder(safe_modules)
         sys.meta_path.insert(0, _INSTALLED_FINDER)
     else:
-        # Just update the existing list
         _INSTALLED_FINDER.names.update(safe_modules)
 
 
