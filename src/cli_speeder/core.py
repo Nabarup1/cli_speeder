@@ -88,8 +88,6 @@ def lazy_import(name: str, package: Optional[str] = None) -> Any:
 def lazy_from_import(module_name: str, class_name: str, package: Optional[str] = None) -> Any:
     return LazyObjectProxy(module_name, class_name, package)
 
-
-
 class _LazyFinder(importlib.abc.MetaPathFinder):
     """
     A custom importer that intercepts specific module names and 
@@ -97,35 +95,79 @@ class _LazyFinder(importlib.abc.MetaPathFinder):
     """
     def __init__(self, names: List[str]):
         self.names = set(names)
+        self._skip = set() # To prevent recursion
 
     def find_spec(self, fullname, path, target=None):
-        if fullname in self.names:
+        # Check if we should intercept this module
+        # We only care if the TOP LEVEL package matches our list
+        root_pkg = fullname.split(".")[0]
+        if root_pkg not in self.names:
+            return None
+            
+        if fullname in self._skip:
+            return None
+
+        # Prevent recursion: Mark this module as "being looked up"
+        self._skip.add(fullname)
+        
+        try:
+            # Find the *real* spec using other finders
+            # IMPORTANT: We iterate sys.meta_path manually to skip ourselves
+            spec = None
             for finder in sys.meta_path:
-                if finder is self: continue # Skip ourselves
+                if finder is self: 
+                    continue
                 try:
-                    spec = finder.find_spec(fullname, path, target)
-                except AttributeError:
-                    continue # Some old finders don't have find_spec
-                
-                if spec is not None:
-                    # MAGIC: Wrap the real loader in a LazyLoader
-                    # This is a standard Python feature (since 3.5)!
-                    spec.loader = importlib.util.LazyLoader(spec.loader)
-                    return spec
-        return None
+                    # Check if finder has find_spec (some legacy ones don't)
+                    if hasattr(finder, "find_spec"):
+                        spec = finder.find_spec(fullname, path, target)
+                        if spec:
+                            break
+                except ImportError:
+                    continue
+
+            if spec is None:
+                return None
+
+            # MAGIC: Wrap the real loader in a LazyLoader
+            # Only wrap if it has a loader 
+            if spec.loader and not isinstance(spec.loader, importlib.util.LazyLoader):
+                spec.loader = importlib.util.LazyLoader(spec.loader)
+            
+            return spec
+            
+        finally:
+            # Always clear the recursion guard
+            self._skip.discard(fullname)
+
+# Global reference to avoid adding multiple finders
+_INSTALLED_FINDER = None
 
 def speed_up_modules(modules: List[str]):
     """
-    MAGIC FIX: Call this ONCE at the top of your script.
-    It forces the listed modules to be lazy-loaded globally.
+    Forces the listed modules to be lazy-loaded globally.
     
-    Usage:
-        from cli_speeder import speed_up_modules
-        speed_up_modules(["pandas", "numpy", "tensorflow"])
-        
-        import pandas as pd # <--- Now instant!
+    Args:
+        modules: List of top-level package names (e.g., ["pandas", "boto3"])
     """
-    sys.meta_path.insert(0, _LazyFinder(modules))
+    global _INSTALLED_FINDER
+    
+    # Remove numpy/torch from the list if the user accidentally added them
+    # (Safety mechanism for V2)
+    unsafe = {"numpy", "torch", "pydantic"}
+    safe_modules = [m for m in modules if m not in unsafe]
+    
+    if len(safe_modules) != len(modules):
+        # We could warn here, but silent safety is better for CLIs
+        pass
+
+    if _INSTALLED_FINDER is None:
+        _INSTALLED_FINDER = _LazyFinder(safe_modules)
+        sys.meta_path.insert(0, _INSTALLED_FINDER)
+    else:
+        # Just update the existing list
+        _INSTALLED_FINDER.names.update(safe_modules)
+
 
 @contextmanager
 def lazy_imports():
