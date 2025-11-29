@@ -164,18 +164,18 @@ def speed_up_modules(modules: List[str]):
         _INSTALLED_FINDER.names.update(safe_modules)
 
 
-@contextmanager
-def lazy_imports():
-    """
-    Context manager syntax.
+# @contextmanager
+# def lazy_imports():
+#     """
+#     Context manager syntax.
     
-    Usage:
-        with lazy_imports():
-            import pandas as pd
-            import numpy as np
-    """
-    # We can't easily make 'with' work without hacking sys.meta_path anyway,
-    # but typically users prefer the 'speed_up_modules' approach for global scripts.
-    # For a true 'local' context manager, we'd need AST manipulation which is unsafe.
-    # Instead, we'll use the same MetaPath trick but only for the duration of the block.
-    raise NotImplementedError("Use 'speed_up_modules([...])' at the top of your file instead. It's safer and cleaner.")
+#     Usage:
+#         with lazy_imports():
+#             import pandas as pd
+#             import numpy as np
+#     """
+#     # We can't easily make 'with' work without hacking sys.meta_path anyway,
+#     # but typically users prefer the 'speed_up_modules' approach for global scripts.
+#     # For a true 'local' context manager, we'd need AST manipulation which is unsafe.
+#     # Instead, we'll use the same MetaPath trick but only for the duration of the block.
+#     raise NotImplementedError("Use 'speed_up_modules([...])' at the top of your file instead. It's safer and cleaner.")
